@@ -59,7 +59,7 @@ function plugin_singlesignon_install() {
    if (!$DB->tableExists($providersTable)) {
       $DB->doQuery(
          "CREATE TABLE `$providersTable` (
-            `id`                         INT NOT NULL AUTO_INCREMENT,
+            `id`                         INT UNSIGNED NOT NULL AUTO_INCREMENT,
             `is_default`                 TINYINT(1) NOT NULL DEFAULT '0',
             `popup`                      TINYINT(1) NOT NULL DEFAULT '0',
             `split_domain`               TINYINT(1) NOT NULL DEFAULT '0',
@@ -76,8 +76,6 @@ function plugin_singlesignon_install() {
             `is_active`                  TINYINT(1) NOT NULL DEFAULT '0',
             `use_email_for_login`        TINYINT(1) NOT NULL DEFAULT '0',
             `split_name`                 TINYINT(1) NOT NULL DEFAULT '0',
-            `ssl_verifyhost`             TINYINT(1) NOT NULL DEFAULT '1',
-            `ssl_verifypeer`             TINYINT(1) NOT NULL DEFAULT '1',
             `is_deleted`                 TINYINT(1) NOT NULL DEFAULT '0',
             `comment`                    TEXT COLLATE utf8mb4_unicode_ci,
             `date_mod`                   TIMESTAMP NULL DEFAULT NULL,
@@ -102,16 +100,6 @@ function plugin_singlesignon_install() {
       );
       $migration->addField($providersTable, 'use_email_for_login', 'bool');
       $migration->addField($providersTable, 'split_name', 'bool');
-      if (!$DB->fieldExists($providersTable, 'ssl_verifyhost')) {
-         $migration->addField($providersTable, 'ssl_verifyhost', 'bool', [
-            'value' => 1,  // Default to enabled for security
-         ]);
-      }
-      if (!$DB->fieldExists($providersTable, 'ssl_verifypeer')) {
-         $migration->addField($providersTable, 'ssl_verifypeer', 'bool', [
-            'value' => 1,  // Default to enabled for security
-         ]);
-
    }
 
    if (version_compare($currentVersion, '1.2.0', '<')) {
@@ -144,9 +132,50 @@ function plugin_singlesignon_install() {
       );
    }
 
+   // Version 1.6.0 migrations
+   if (version_compare($currentVersion, '1.6.0', '<')) {
+      // Add SSL verification options
+      $migration->addField($providersTable, 'ssl_verifyhost', 'bool', [
+         'value' => 1,  // Default to enabled for security
+      ]);
+      $migration->addField($providersTable, 'ssl_verifypeer', 'bool', [
+         'value' => 1,  // Default to enabled for security
+      ]);
+
+      // Add group-based access control fields
+      $migration->addField(
+         $providersTable,
+         'allowed_groups',
+         'text',
+         [
+            'nodefault' => true,
+            'null'      => true,
+         ]
+      );
+
+      // Add custom groups claim field
+      $migration->addField(
+         $providersTable,
+         'groups_claim',
+         'string',
+         [
+            'nodefault' => true,
+            'null'      => true,
+         ]
+      );
+
+      // Fix signed INT to UNSIGNED for GLPI 11 compliance
+      $columns = $DB->listFields($providersTable);
+      if (isset($columns['id']) && isset($columns['id']['Type'])) {
+         if (stripos($columns['id']['Type'], 'unsigned') === false) {
+            $DB->doQuery("ALTER TABLE `$providersTable` MODIFY `id` INT UNSIGNED NOT NULL AUTO_INCREMENT");
+         }
+      }
+   }
+
    // Create the providers_users linking table if it doesn't exist
    // This table is needed to link OAuth remote_id to GLPI users
-   if (!$DB->tableExists($providersUsersTable)) {
+   if (version_compare($currentVersion, '1.3.0', '<') && !$DB->tableExists($providersUsersTable)) {
       $DB->doQuery(
          "CREATE TABLE `$providersUsersTable` (
             `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -214,6 +243,9 @@ function plugin_singlesignon_uninstall() {
 
    $config = new Config();
    $config->deleteConfigurationValues('plugin:singlesignon');
+
+   // Explicitly remove plugin config from database to ensure clean uninstall
+   $DB->delete('glpi_configs', ['context' => 'plugin:singlesignon']);
 
    $providersUsersTable = 'glpi_plugin_singlesignon_providers_users';
    $providersTable = 'glpi_plugin_singlesignon_providers';

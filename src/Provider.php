@@ -226,6 +226,14 @@ class Provider extends \CommonDBTM {
       echo "</td></tr>\n";
 
       echo "<tr class='tab_bg_1'>";
+      echo "<td>" . \__sso('Allowed Groups');
+      echo "&nbsp;";
+      \Html::showToolTip(nl2br(\__sso('Restrict login to users in specific OAuth groups. Enter group names or IDs separated by commas (e.g., admin,developers,staff). Leave empty to allow all users. The user must belong to at least one of the specified groups.')));
+      echo "</td>";
+      echo "<td colspan='3'><input type='text' style='width:96%' name='allowed_groups' value='" . ($this->fields["allowed_groups"] ?? '') . "' class='form-control' placeholder='admin,developers,staff'></td>";
+      echo "</tr>\n";
+
+      echo "<tr class='tab_bg_1'>";
       echo "<td>" . \__sso("Use Email as Login") . "<td>";
       \Dropdown::showYesNo("use_email_for_login", $this->fields["use_email_for_login"]);
       echo "</td>";
@@ -252,6 +260,14 @@ class Provider extends \CommonDBTM {
       echo "<td>";
       \Dropdown::showYesNo("ssl_verifypeer", $this->fields["ssl_verifypeer"] ?? 1);
       echo "</td>";
+      echo "</tr>\n";
+
+      echo "<tr class='tab_bg_1'>";
+      echo "<td>" . \__sso('Groups Claim Name');
+      echo "&nbsp;";
+      \Html::showToolTip(nl2br(\__sso('Override the claim name used to extract user groups from the OAuth response. Supports dot notation for nested fields (e.g., "realm_access.roles", "custom.groups"). Leave empty to use default claim names (groups, roles, realm_access.roles).')));
+      echo "</td>";
+      echo "<td colspan='3'><input type='text' style='width:96%' name='groups_claim' value='" . ($this->fields["groups_claim"] ?? '') . "' class='form-control' placeholder='groups'></td>";
       echo "</tr>\n";
 
       echo "<tr class='tab_bg_1'>";
@@ -1213,6 +1229,92 @@ class Provider extends \CommonDBTM {
       return $this->_resource_owner;
    }
 
+   /**
+    * Extract user groups from OAuth resource response
+    * Supports custom claim names with dot notation
+    *
+    * @param array $resource_array The OAuth resource owner data
+    * @return array Array of group names
+    */
+   protected function extractUserGroups($resource_array) {
+      $groups = [];
+
+      // Check if a custom groups claim is configured
+      if (!empty($this->fields['groups_claim'])) {
+         $claim_path = $this->fields['groups_claim'];
+
+         if ($this->debug) {
+            print_r("\nUsing custom groups claim: $claim_path\n");
+         }
+
+         // Support dot notation for nested fields (e.g., "realm_access.roles")
+         $keys = explode('.', $claim_path);
+         $value = $resource_array;
+
+         foreach ($keys as $key) {
+            if (isset($value[$key])) {
+               $value = $value[$key];
+            } else {
+               $value = null;
+               break;
+            }
+         }
+
+         if ($value !== null) {
+            if (is_array($value)) {
+               $groups = array_merge($groups, $value);
+            } elseif (is_string($value)) {
+               // Support comma or space-separated strings
+               $groups = array_merge($groups, preg_split('/[,\s]+/', $value));
+            }
+         }
+
+         if ($this->debug) {
+            print_r("Groups from custom claim: ");
+            var_dump($groups);
+         }
+
+         // If custom claim is configured, only use that claim
+         if (!empty($groups)) {
+            return array_values(array_filter(array_unique($groups), function($group) {
+               return !empty($group);
+            }));
+         }
+      }
+
+      // Fall back to checking standard group field names
+      $group_fields = ['groups', 'roles', 'group', 'role'];
+
+      foreach ($group_fields as $field) {
+         if (isset($resource_array[$field])) {
+            if (is_array($resource_array[$field])) {
+               $groups = array_merge($groups, $resource_array[$field]);
+            } elseif (is_string($resource_array[$field])) {
+               $groups = array_merge($groups, preg_split('/[,\s]+/', $resource_array[$field]));
+            }
+         }
+      }
+
+      // Keycloak-specific: realm_access.roles
+      if (isset($resource_array['realm_access']['roles']) && is_array($resource_array['realm_access']['roles'])) {
+         $groups = array_merge($groups, $resource_array['realm_access']['roles']);
+      }
+
+      // Keycloak-specific: resource_access.{client_id}.roles
+      if (isset($resource_array['resource_access']) && is_array($resource_array['resource_access'])) {
+         foreach ($resource_array['resource_access'] as $client_roles) {
+            if (isset($client_roles['roles']) && is_array($client_roles['roles'])) {
+               $groups = array_merge($groups, $client_roles['roles']);
+            }
+         }
+      }
+
+      // Remove duplicates, empty values, and reindex array
+      return array_values(array_filter(array_unique($groups), function($group) {
+         return !empty($group);
+      }));
+   }
+
    public function findUser() {
       $resource_array = $this->getResourceOwner();
 
@@ -1222,6 +1324,38 @@ class Provider extends \CommonDBTM {
       }
       if (!$resource_array) {
          return false;
+      }
+
+      // Check group-based access control
+      if (!empty($this->fields['allowed_groups'])) {
+         $allowed_groups = array_map('trim', explode(',', $this->fields['allowed_groups']));
+         $user_groups = $this->extractUserGroups($resource_array);
+
+         if ($this->debug) {
+            print_r("\nGroup-based access control enabled\n");
+            print_r("Allowed groups: ");
+            var_dump($allowed_groups);
+            print_r("User groups: ");
+            var_dump($user_groups);
+         }
+
+         $has_access = false;
+         foreach ($user_groups as $user_group) {
+            if (in_array($user_group, $allowed_groups)) {
+               $has_access = true;
+               if ($this->debug) {
+                  print_r("Access granted - user is in group: $user_group\n");
+               }
+               break;
+            }
+         }
+
+         if (!$has_access) {
+            if ($this->debug) {
+               print_r("Access denied - user is not in any allowed group\n");
+            }
+            return false;
+         }
       }
 
       $user = new \User();
