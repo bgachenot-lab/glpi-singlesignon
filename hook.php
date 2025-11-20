@@ -76,6 +76,8 @@ function plugin_singlesignon_install() {
             `is_active`                  TINYINT(1) NOT NULL DEFAULT '0',
             `use_email_for_login`        TINYINT(1) NOT NULL DEFAULT '0',
             `split_name`                 TINYINT(1) NOT NULL DEFAULT '0',
+            `ssl_verifyhost`             TINYINT(1) NOT NULL DEFAULT '1',
+            `ssl_verifypeer`             TINYINT(1) NOT NULL DEFAULT '1',
             `is_deleted`                 TINYINT(1) NOT NULL DEFAULT '0',
             `comment`                    TEXT COLLATE utf8mb4_unicode_ci,
             `date_mod`                   TIMESTAMP NULL DEFAULT NULL,
@@ -100,6 +102,16 @@ function plugin_singlesignon_install() {
       );
       $migration->addField($providersTable, 'use_email_for_login', 'bool');
       $migration->addField($providersTable, 'split_name', 'bool');
+      if (!$DB->fieldExists($providersTable, 'ssl_verifyhost')) {
+         $migration->addField($providersTable, 'ssl_verifyhost', 'bool', [
+            'value' => 1,  // Default to enabled for security
+         ]);
+      }
+      if (!$DB->fieldExists($providersTable, 'ssl_verifypeer')) {
+         $migration->addField($providersTable, 'ssl_verifypeer', 'bool', [
+            'value' => 1,  // Default to enabled for security
+         ]);
+
    }
 
    if (version_compare($currentVersion, '1.2.0', '<')) {
@@ -132,18 +144,47 @@ function plugin_singlesignon_install() {
       );
    }
 
-   if (version_compare($currentVersion, '1.3.0', '<') && !$DB->tableExists($providersUsersTable)) {
+   // Create the providers_users linking table if it doesn't exist
+   // This table is needed to link OAuth remote_id to GLPI users
+   if (!$DB->tableExists($providersUsersTable)) {
       $DB->doQuery(
          "CREATE TABLE `$providersUsersTable` (
-            `id` INT NOT NULL AUTO_INCREMENT,
-            `plugin_singlesignon_providers_id` INT NOT NULL DEFAULT '0',
-            `users_id` INT NOT NULL DEFAULT '0',
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `plugin_singlesignon_providers_id` INT UNSIGNED NOT NULL DEFAULT '0',
+            `users_id` INT UNSIGNED NOT NULL DEFAULT '0',
             `remote_id` VARCHAR(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
             PRIMARY KEY (`id`),
             UNIQUE KEY `unicity` (`plugin_singlesignon_providers_id`,`users_id`),
             UNIQUE KEY `unicity_remote` (`plugin_singlesignon_providers_id`,`remote_id`)
          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
       );
+   } else {
+      // Table exists - check if columns need to be updated to UNSIGNED
+      // This auto-fixes the GLPI 11 deprecation warning about signed integers
+      $columns = $DB->listFields($providersUsersTable);
+
+      $needsUpdate = false;
+      $columnsToUpdate = ['id', 'plugin_singlesignon_providers_id', 'users_id'];
+
+      foreach ($columnsToUpdate as $column) {
+         if (isset($columns[$column]) && isset($columns[$column]['Type'])) {
+            // Check if the column type contains 'unsigned' (case insensitive)
+            if (stripos($columns[$column]['Type'], 'unsigned') === false) {
+               $needsUpdate = true;
+               break;
+            }
+         }
+      }
+
+      if ($needsUpdate) {
+         // Update columns to UNSIGNED to fix GLPI 11 deprecation warnings
+         $DB->doQuery(
+            "ALTER TABLE `$providersUsersTable`
+               MODIFY `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+               MODIFY `plugin_singlesignon_providers_id` INT UNSIGNED NOT NULL DEFAULT '0',
+               MODIFY `users_id` INT UNSIGNED NOT NULL DEFAULT '0'"
+         );
+      }
    }
 
    if (!countElementsInTable('glpi_displaypreferences', ['itemtype' => 'PluginSinglesignonProvider'])) {
